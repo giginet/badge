@@ -1,7 +1,7 @@
 require 'fastimage'
 require 'timeout'
 require 'mini_magick'
-require 'curb'
+require 'open-uri'
 
 module Badge
   class Runner
@@ -35,11 +35,11 @@ module Badge
           timeout = Badge.shield_io_timeout
           timeout = options[:shield_io_timeout] if options[:shield_io_timeout]
           Timeout.timeout(timeout.to_i) do
-            shield = load_shield(options[:shield]) if options[:shield]
+            shield = load_shield(options[:shield], options[:shield_parameters]) if options[:shield]
           end
         rescue Timeout::Error
           UI.error "Error loading image from shields.io timeout reached. Use --verbose for more info".red
-        rescue Curl::Err::CurlError => error
+        rescue OpenURI::HTTPError => error
           response = error.io
           UI.error "Error loading image from shields.io response Error. Use --verbose for more info".red
           UI.verbose response.status if FastlaneCore::Globals.verbose?
@@ -68,6 +68,10 @@ module Badge
 
           result = MiniMagick::Image.new(full_path)
 
+          if options[:grayscale]
+            result.colorspace 'gray'
+            icon_changed = true
+          end
           if !options[:no_badge]
             result = add_badge(options[:custom], options[:dark], icon, options[:alpha], alpha_channel, options[:badge_gravity])
             icon_changed = true
@@ -76,7 +80,6 @@ module Badge
             result = add_shield(icon, result, shield, alpha_channel, options[:shield_gravity], options[:shield_no_resize], options[:shield_scale], options[:shield_geometry])
             icon_changed = true
           end
-
           if icon_changed
             result.format "png"
             result.write full_path
@@ -87,12 +90,6 @@ module Badge
         else
           UI.message "Did nothing... Enable --verbose for more info.".red
         end
-
-        if shield
-          File.delete(shield) if File.exist?(shield)
-          File.delete("#{shield.path}.png") if File.exist?("#{shield.path}.png")
-        end
-
       else
         UI.error "Could not find any app icons...".red
       end
@@ -106,10 +103,15 @@ module Badge
 
       if @@rsvg_enabled
         new_path = "#{shield.path}.png"
-        if shield_no_resize
-          `rsvg-convert #{shield.path} -z #{shield_scale} -o #{new_path}`
-        else
-          `rsvg-convert #{shield.path} -w #{(icon.width * shield_scale).to_i} -a -o #{new_path}`
+        begin
+          if shield_no_resize
+            `rsvg-convert #{shield.path} -z #{shield_scale} -o #{new_path}`
+          else
+            `rsvg-convert #{shield.path} -w #{(icon.width * shield_scale).to_i} -a -o #{new_path}`
+          end
+        rescue Exception => error
+          UI.error "Other error occured. Use --verbose for more info".red
+          UI.verbose error if FastlaneCore::Globals.verbose?
         end
         new_shield = MiniMagick::Image.open(new_path)
       else
@@ -124,17 +126,16 @@ module Badge
       result = composite(result, new_shield, alpha_channel, shield_gravity || "north", shield_geometry)
     end
 
-    def load_shield(shield_string)
-      url = Badge.shield_base_url + Badge.shield_path + shield_string + (@@rsvg_enabled ? ".svg" : ".png")
-      file_name = shield_string + (@@rsvg_enabled ? ".svg" : ".png")
+    def load_shield(shield_string, shield_parameters)
+      url = (@@rsvg_enabled ? Badge.shield_svg_base_url : Badge.shield_base_url) + Badge.shield_path + shield_string + (@@rsvg_enabled ? ".svg" : ".png")
+      if shield_parameters
+        url = url + "?" + shield_parameters
+      end
 
       UI.verbose "Trying to load image from shields.io. Timeout: #{Badge.shield_io_timeout}s".blue
       UI.verbose "URL: #{url}".blue
 
-      Curl::Easy.download(url, file_name)
-      MiniMagick::Image.open(file_name) unless @@rsvg_enabled
-
-      File.open(file_name)
+      MiniMagick::Image.open(url)
     end
 
     def check_tools!
